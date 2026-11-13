@@ -1,6 +1,8 @@
 {
   "A": {"dependencies": ["B", "C"]},
-  "B": {"dependencies": ["D"]},
-  "C": {"dependencies": []},
-  "D": {"dependencies": []}
+  "B": {"dependencies": ["D", "E"]},
+  "C": {"dependencies": ["F"]},
+  "D": {"dependencies": ["A"]},
+  "E": {"dependencies": []},
+  "F": {"dependencies": ["IGNORE_ME"]}
 }
