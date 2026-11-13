@@ -21,6 +21,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--test-mode", action="store_true", help="Тестовый режим")
     parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH, help="Глубина")
     parser.add_argument("--filter", type=str, default="", help="Подстрока фильтра")
+    parser.add_argument("--reverse", action="store_true", help="Поиск обратных зависимостей")
     return parser.parse_args()
 
 
@@ -40,6 +41,7 @@ def print_configuration(args: argparse.Namespace) -> None:
     print(f"test_mode: {args.test_mode}")
     print(f"max_depth: {args.max_depth}")
     print(f"filter: '{args.filter}'")
+    print(f"reverse: {args.reverse}")
 
 
 def load_json_from_url(url: str) -> dict:
@@ -77,12 +79,19 @@ def load_json_from_file(path: str) -> dict:
         sys.exit(1)
 
 
+def build_inverted_graph(data: dict) -> dict:
+    inverted = {pkg: [] for pkg in data}
+    for pkg, info in data.items():
+        for dep in info.get("dependencies", []):
+            if dep in inverted:
+                inverted[dep].append(pkg)
+    return inverted
+
+
 def get_dependencies_silent(package_name: str, url: str, test_mode: bool) -> list:
     if test_mode:
         data = load_json_from_file(url)
-        if package_name not in data:
-            return []
-        return data[package_name].get("dependencies", [])
+        return data.get(package_name, {}).get("dependencies", [])
 
     full_url = f"{NUGET_API_BASE_URL}/{package_name.lower()}/index.json"
     try:
@@ -131,12 +140,10 @@ def build_dependency_graph(
 
         if depth < max_depth:
             deps = get_deps_func(pkg)
-            
             filtered_deps = [
                 dep for dep in deps 
                 if not (filter_str and filter_str.lower() in dep.lower())
             ]
-            
             graph[pkg] = filtered_deps
 
             for dep in filtered_deps:
@@ -148,8 +155,13 @@ def build_dependency_graph(
     return graph, cycles
 
 
-def print_graph_results(graph: dict, cycles: list, start_pkg: str) -> None:
-    print(f"\nГраф зависимостей (начиная с '{start_pkg}'):")
+def print_graph_results(
+    graph: dict, cycles: list, start_pkg: str, is_reverse: bool = False
+) -> None:
+
+    title = "Обратные зависимости" if is_reverse else "Граф зависимостей"
+    print(f"\n{title} (начиная с '{start_pkg}'):")
+    
     for pkg, deps in graph.items():
         deps_str = ", ".join(deps) if deps else "нет"
         print(f"  {pkg} -> [{deps_str}]")
@@ -163,21 +175,39 @@ def print_graph_results(graph: dict, cycles: list, start_pkg: str) -> None:
 
 
 def main() -> None:
+
     args = parse_arguments()
     validate_arguments(args)
     print_configuration(args)
 
-    print("\nЭтап 3: построение графа (DFS без рекурсии)")
-    
-    def deps_wrapper(pkg: str) -> list:
-        return get_dependencies_silent(pkg, args.url, args.test_mode)
+    if args.reverse:
+        print("\nЭтап 4: Обратные зависимости")
+        if args.test_mode:
+            data = load_json_from_file(args.url)
+            inverted_graph = build_inverted_graph(data)
+            
+            def get_reverse_deps(pkg: str) -> list:
+                return inverted_graph.get(pkg, [])
+            
+            graph, cycles = build_dependency_graph(
+                args.package, args.max_depth, args.filter, get_reverse_deps
+            )
+            print_graph_results(graph, cycles, args.package, is_reverse=True)
+        else:
+            print("\nРежим обратных зависимостей поддерживается в --test-mode")
+            print("(так как требует наличия полного графа репозитория для инверсии)")
+    else:
+        print("\nЭтап 3: Построение графа (DFS без рекурсии)")
+        
+        def deps_wrapper(pkg: str) -> list:
+            return get_dependencies_silent(pkg, args.url, args.test_mode)
 
-    graph, cycles = build_dependency_graph(
-        args.package, args.max_depth, args.filter, deps_wrapper
-    )
-    
-    print_graph_results(graph, cycles, args.package)
-    print("\nЭтап 3 успешно завершён")
+        graph, cycles = build_dependency_graph(
+            args.package, args.max_depth, args.filter, deps_wrapper
+        )
+        print_graph_results(graph, cycles, args.package, is_reverse=False)
+
+    print("\nЭтап успешно завершён")
 
 
 if __name__ == "__main__":
