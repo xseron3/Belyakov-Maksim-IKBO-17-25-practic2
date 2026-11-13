@@ -21,7 +21,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--test-mode", action="store_true", help="Тестовый режим")
     parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH, help="Глубина")
     parser.add_argument("--filter", type=str, default="", help="Подстрока фильтра")
-    parser.add_argument("--reverse", action="store_true", help="Поиск обратных зависимостей")
+    parser.add_argument("--reverse", action="store_true", help="Обратные зависимости")
     return parser.parse_args()
 
 
@@ -155,10 +155,26 @@ def build_dependency_graph(
     return graph, cycles
 
 
+def generate_graphviz(graph: dict, start_pkg: str, is_reverse: bool) -> str:
+    direction = "Обратные" if is_reverse else "Прямые"
+    lines = [
+        f'digraph "{start_pkg}_{direction.lower()}_dependencies" {{',
+        '    rankdir=LR;',
+        '    node [shape=box, style=filled, fillcolor=lightblue];',
+        '    edge [color=gray];',
+    ]
+    
+    for pkg, deps in graph.items():
+        for dep in deps:
+            lines.append(f'    "{pkg}" -> "{dep}";')
+    
+    lines.append('}')
+    return '\n'.join(lines)
+
+
 def print_graph_results(
     graph: dict, cycles: list, start_pkg: str, is_reverse: bool = False
 ) -> None:
-
     title = "Обратные зависимости" if is_reverse else "Граф зависимостей"
     print(f"\n{title} (начиная с '{start_pkg}'):")
     
@@ -173,15 +189,18 @@ def print_graph_results(
     else:
         print("\nЦиклические зависимости не обнаружены.")
 
+    print("\nОписание графа на языке Graphviz (DOT)")
+    print(generate_graphviz(graph, start_pkg, is_reverse))
+    print("Конец DOT-разметки")
+
 
 def main() -> None:
-
     args = parse_arguments()
     validate_arguments(args)
     print_configuration(args)
 
     if args.reverse:
-        print("\nЭтап 4: Обратные зависимости")
+        print("\nЭтап 4: обратные зависимости")
         if args.test_mode:
             data = load_json_from_file(args.url)
             inverted_graph = build_inverted_graph(data)
@@ -195,9 +214,8 @@ def main() -> None:
             print_graph_results(graph, cycles, args.package, is_reverse=True)
         else:
             print("\nРежим обратных зависимостей поддерживается в --test-mode")
-            print("(так как требует наличия полного графа репозитория для инверсии)")
     else:
-        print("\nЭтап 3: Построение графа (DFS без рекурсии)")
+        print("\nЭтап 5: визуализация (Graphviz)")
         
         def deps_wrapper(pkg: str) -> list:
             return get_dependencies_silent(pkg, args.url, args.test_mode)
