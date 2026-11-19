@@ -16,12 +16,25 @@ GZIP_SIGNATURE = b'\x1f\x8b'
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Анализатор NuGet")
-    parser.add_argument("--package", required=True, help="Имя пакета")
-    parser.add_argument("--url", required=True, help="URL или путь к файлу")
-    parser.add_argument("--test-mode", action="store_true", help="Тестовый режим")
-    parser.add_argument("--max-depth", type=int, default=DEFAULT_MAX_DEPTH, help="Глубина")
-    parser.add_argument("--filter", type=str, default="", help="Подстрока фильтра")
-    parser.add_argument("--reverse", action="store_true", help="Обратные зависимости")
+    parser.add_argument(
+        "--package", required=True, help="Имя пакета"
+    )
+    parser.add_argument(
+        "--url", required=True, help="URL или путь к файлу"
+    )
+    parser.add_argument(
+        "--test-mode", action="store_true", help="Тестовый режим"
+    )
+    parser.add_argument(
+        "--max-depth", type=int, default=DEFAULT_MAX_DEPTH,
+        help="Глубина"
+    )
+    parser.add_argument(
+        "--filter", type=str, default="", help="Подстрока фильтра"
+    )
+    parser.add_argument(
+        "--reverse", action="store_true", help="Обратные зависимости"
+    )
     return parser.parse_args()
 
 
@@ -88,38 +101,63 @@ def build_inverted_graph(data: dict) -> dict:
     return inverted
 
 
-def get_dependencies_silent(package_name: str, url: str, test_mode: bool) -> list:
+def get_dependencies_silent(
+    package_name: str, url: str, test_mode: bool
+) -> list:
     if test_mode:
         data = load_json_from_file(url)
         return data.get(package_name, {}).get("dependencies", [])
+    return fetch_nuget_dependencies(package_name)
 
+
+def fetch_nuget_dependencies(package_name: str) -> list:
     full_url = f"{NUGET_API_BASE_URL}/{package_name.lower()}/index.json"
     try:
         data = load_json_from_url(full_url)
-        items = data.get("items", [])
-        if not items:
-            return []
-        
-        last_page = items[-1]
-        if "items" in last_page and last_page["items"]:
-            latest = last_page["items"][-1]
-        elif "@id" in last_page:
-            page_data = load_json_from_url(last_page["@id"])
-            latest = page_data.get("items", [])[-1]
-        else:
-            return []
-
-        catalog = latest.get("catalogEntry", {})
-        deps = list(catalog.get("dependencies", []))
-        for group in catalog.get("dependencyGroups", []):
-            for dep in group.get("dependencies", []):
-                dep_id = dep.get("id")
-                if dep_id and not any(d.get("id") == dep_id for d in deps):
-                    deps.append(dep)
-        
-        return [d.get("id", "неизвестно") for d in deps]
+        catalog = extract_latest_catalog(data)
+        return collect_dependency_ids(catalog)
     except SystemExit:
         return []
+
+
+def extract_latest_catalog(data: dict) -> dict:
+    items = data.get("items", [])
+    if not items:
+        return {}
+    last_page = items[-1]
+    if last_page.get("items"):
+        latest = last_page["items"][-1]
+    elif "@id" in last_page:
+        page_data = load_json_from_url(last_page["@id"])
+        page_items = page_data.get("items", [])
+        if not page_items:
+            return {}
+        latest = page_items[-1]
+    else:
+        return {}
+    return latest.get("catalogEntry", {})
+
+
+def current_ids(deps: list) -> list:
+    return [d.get("id") for d in deps]
+
+
+def collect_dependency_ids(catalog: dict) -> list:
+    deps = list(catalog.get("dependencies", []))
+    for group in catalog.get("dependencyGroups", []):
+        for dep in group.get("dependencies", []):
+            dep_id = dep.get("id")
+            if dep_id and dep_id not in current_ids(deps):
+                deps.append(dep)
+    return [d.get("id", "неизвестно") for d in deps]
+
+
+def matches_filter(name: str, filter_str: str) -> bool:
+    return bool(filter_str) and filter_str.lower() in name.lower()
+
+
+def apply_filter(deps: list, filter_str: str) -> list:
+    return [d for d in deps if not matches_filter(d, filter_str)]
 
 
 def build_dependency_graph(
@@ -132,25 +170,18 @@ def build_dependency_graph(
 
     while stack:
         pkg, depth = stack.pop()
-
-        if pkg in visited or (filter_str and filter_str.lower() in pkg.lower()):
+        if pkg in visited or matches_filter(pkg, filter_str):
             continue
-
         visited.add(pkg)
-
-        if depth < max_depth:
-            deps = get_deps_func(pkg)
-            filtered_deps = [
-                dep for dep in deps 
-                if not (filter_str and filter_str.lower() in dep.lower())
-            ]
-            graph[pkg] = filtered_deps
-
-            for dep in filtered_deps:
-                if dep in visited:
-                    cycles.append(f"{pkg} -> {dep}")
-                else:
-                    stack.append((dep, depth + 1))
+        if depth >= max_depth:
+            continue
+        deps = apply_filter(get_deps_func(pkg), filter_str)
+        graph[pkg] = deps
+        for dep in deps:
+            if dep in visited:
+                cycles.append(f"{pkg} -> {dep}")
+            else:
+                stack.append((dep, depth + 1))
 
     return graph, cycles
 
@@ -163,11 +194,9 @@ def generate_graphviz(graph: dict, start_pkg: str, is_reverse: bool) -> str:
         '    node [shape=box, style=filled, fillcolor=lightblue];',
         '    edge [color=gray];',
     ]
-    
     for pkg, deps in graph.items():
         for dep in deps:
             lines.append(f'    "{pkg}" -> "{dep}";')
-    
     lines.append('}')
     return '\n'.join(lines)
 
@@ -177,7 +206,6 @@ def print_graph_results(
 ) -> None:
     title = "Обратные зависимости" if is_reverse else "Граф зависимостей"
     print(f"\n{title} (начиная с '{start_pkg}'):")
-    
     for pkg, deps in graph.items():
         deps_str = ", ".join(deps) if deps else "нет"
         print(f"  {pkg} -> [{deps_str}]")
@@ -204,26 +232,27 @@ def main() -> None:
         if args.test_mode:
             data = load_json_from_file(args.url)
             inverted_graph = build_inverted_graph(data)
-            
+
             def get_reverse_deps(pkg: str) -> list:
                 return inverted_graph.get(pkg, [])
-            
+
             graph, cycles = build_dependency_graph(
-                args.package, args.max_depth, args.filter, get_reverse_deps
+                args.package, args.max_depth, args.filter,
+                get_reverse_deps
             )
-            print_graph_results(graph, cycles, args.package, is_reverse=True)
+            print_graph_results(graph, cycles, args.package, True)
         else:
-            print("\nРежим обратных зависимостей поддерживается в --test-mode")
+            print("\nОбратные зависимости доступны с --test-mode")
     else:
         print("\nЭтап 5: визуализация (Graphviz)")
-        
+
         def deps_wrapper(pkg: str) -> list:
             return get_dependencies_silent(pkg, args.url, args.test_mode)
 
         graph, cycles = build_dependency_graph(
             args.package, args.max_depth, args.filter, deps_wrapper
         )
-        print_graph_results(graph, cycles, args.package, is_reverse=False)
+        print_graph_results(graph, cycles, args.package, False)
 
     print("\nЭтап успешно завершён")
 
